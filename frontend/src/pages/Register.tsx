@@ -58,7 +58,7 @@ const ROLE_CONFIG = {
     description: 'Access medications, consultations, and health records',
     buttonText: 'Create Account',
     loadingText: 'Creating account...',
-    successRedirect: '/customer/dashboard',
+    successRedirect: '/customer',
     requiresApproval: false,
   },
   employee: {
