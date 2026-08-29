@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { useAuthStore } from "@/stores/authStore";
-
+import { GoogleLogin } from "@react-oauth/google";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,7 +15,7 @@ const Login = () => {
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  const { login, user } = useAuthStore();
+  const { login, googleLogin, user } = useAuthStore();
   const navigate = useNavigate();
 
   // ✅ Auto-redirect if already logged in
@@ -69,7 +69,47 @@ const Login = () => {
       setLoading(false);
     }
   };
+  const handleGoogleLogin = async (credentialResponse: any) => {
+    if (!credentialResponse.credential) {
+      toast.error("Google login failed");
+      return;
+    }
 
+    setLoading(true);
+
+    try {
+      const success = await googleLogin(
+        credentialResponse.credential
+      );
+
+      if (!success) {
+        toast.error("Google login failed");
+        return;
+      }
+
+      const loggedInUser = useAuthStore.getState().user;
+
+      if (!loggedInUser) {
+        toast.error("Something went wrong");
+        return;
+      }
+
+      toast.success(`Welcome, ${loggedInUser.name}!`);
+
+      if (loggedInUser.role === "owner") {
+        navigate("/owner/overview");
+      } else if (loggedInUser.role === "employee") {
+        navigate("/employee/medicines");
+      } else {
+        navigate("/customer");
+      }
+
+    } catch (err: any) {
+      toast.error(err.message || "Google login failed");
+    } finally {
+      setLoading(false);
+    }
+  };
   return (
     <div className="min-h-screen flex items-center justify-center bg-background p-4">
 
@@ -115,7 +155,18 @@ const Login = () => {
           <Button type="submit" className="w-full">
             {loading ? "Signing in..." : "Sign In"}
           </Button>
+          <div className="flex items-center gap-3">
+            <div className="h-px flex-1 bg-border" />
+            <span className="text-xs text-muted-foreground">OR</span>
+            <div className="h-px flex-1 bg-border" />
+          </div>
 
+          <div className="flex justify-center">
+            <GoogleLogin
+              onSuccess={handleGoogleLogin}
+              onError={() => toast.error("Google login failed")}
+            />
+          </div>
           <p className="text-center text-sm">
             Don't have an account?{" "}
             <Link to="/register-type" className="text-primary">

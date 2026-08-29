@@ -211,3 +211,15 @@ class EmployeeSignupRequest(Base):
 
     reviewed_at = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+class OTPVerification(Base):
+    __tablename__ = "otp_verifications"
+
+    id = Column(Integer, primary_key=True)
+    email = Column(String)
+    phone = Column(String)
+    verification_type = Column(String)   # "email" or "phone"
+    otp = Column(String)
+    expires_at = Column(DateTime)
+    verified = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)

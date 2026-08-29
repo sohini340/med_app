@@ -4,9 +4,33 @@ from sqlalchemy import func
 from app.database import SessionLocal
 from app import models
 from app.utils.security import get_current_user
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta,date
 from typing import List, Optional
 import json
+from sqlalchemy.orm import joinedload
+from fastapi import Query
+from typing import Optional
+import os
+import base64
+from dotenv import load_dotenv
+from google import genai
+load_dotenv()
+
+gemini_client = genai.Client(
+    api_key=os.getenv("GEMINI_API_KEY")
+)
+import re
+import pytesseract
+from PIL import Image
+import io
+from rapidfuzz import process, fuzz
+
+import base64
+
+
+from datetime import datetime, timedelta, date
+
+
 
 router = APIRouter(prefix="/customer", tags=["Customer"])
 
@@ -467,40 +491,471 @@ async def scan_prescription(
     user=Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    # ============================================================
+    # 1. READ IMAGE
+    # ============================================================
+
     contents = await file.read()
 
-    # TODO: Replace with your AI logic
-    medicines = [
-        {
-            "name": "Paracetamol",
-            "dosage": "500mg",
-            "frequency": "Twice a day",
-            "stockStatus": "in-stock",
-            "stockQuantity": 20,
-            "price": 50,
-            "medicineId": 1
+    if not contents:
+        raise HTTPException(
+            status_code=400,
+            detail="Empty prescription image"
+        )
+
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(
+            status_code=400,
+            detail="File must be an image"
+        )
+
+    # ============================================================
+    # 2. OCR
+    # ============================================================
+
+    try:
+        image = Image.open(io.BytesIO(contents)).convert("L")
+
+        # Improve image
+        from PIL import ImageEnhance, ImageFilter
+
+        image = ImageEnhance.Contrast(image).enhance(2.0)
+        image = image.filter(ImageFilter.SHARPEN)
+
+        # Upscale
+        image = image.resize(
+            (image.width * 3, image.height * 3),
+            Image.Resampling.LANCZOS
+        )
+
+        # IMPORTANT:
+        # Do NOT whitelist characters here.
+        # Prescription OCR can contain useful characters
+        # that the whitelist removes.
+        raw_text = pytesseract.image_to_string(
+            image,
+            config="--oem 3 --psm 6",
+            lang="eng"
+        )
+
+    except pytesseract.TesseractNotFoundError:
+        raise HTTPException(
+            status_code=500,
+            detail="Tesseract OCR is not installed."
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not process prescription image: {str(e)}"
+        )
+
+    print("\n" + "=" * 60)
+    print("OCR RESULT")
+    print("=" * 60)
+    print(raw_text)
+    print("=" * 60 + "\n")
+
+    # ============================================================
+    # 3. KEEP OCR LINES
+    # ============================================================
+
+    # DO NOT use:
+    #
+    # re.sub(r'\s+', ' ', raw_text)
+    #
+    # because that destroys line breaks.
+
+    lines = []
+
+    for line in raw_text.splitlines():
+
+        line = line.strip()
+
+        if len(line) >= 2:
+            lines.append(line)
+
+    print("OCR LINES:")
+    for line in lines:
+        print(" ->", repr(line))
+
+    # ============================================================
+    # 4. GET INVENTORY
+    # ============================================================
+
+    medicines = db.query(models.Medicine).all()
+
+    if not medicines:
+        raise HTTPException(
+            status_code=404,
+            detail="No medicines available in inventory"
+        )
+
+    # ============================================================
+    # 5. NORMALIZATION
+    # ============================================================
+
+    def normalize(text):
+        text = text.lower()
+
+        # Common OCR mistakes
+        replacements = {
+            "0": "o",
+            "|": "l",
+            "1": "i",
         }
-    ]
 
-    summary = "Patient prescribed basic fever medication."
+        for old, new in replacements.items():
+            text = text.replace(old, new)
 
-    prescription = models.Prescription(
-        customer_id=user["user_id"],
-        image_base64=contents,
-        extracted_medicines=[m["name"] for m in medicines],
-        ai_summary=summary,
-        status="done"
+        # Remove punctuation
+        text = re.sub(r"[^a-z0-9\s]", " ", text)
+
+        # Normalize spaces
+        text = re.sub(r"\s+", " ", text).strip()
+
+        return text
+
+    # ============================================================
+    # 6. CREATE MEDICINE SEARCH INDEX
+    # ============================================================
+
+    search_entries = []
+
+    for medicine in medicines:
+
+        if medicine.name:
+            search_entries.append({
+                "text": normalize(medicine.name),
+                "medicine": medicine,
+                "type": "name"
+            })
+
+        if medicine.brand:
+            search_entries.append({
+                "text": normalize(medicine.brand),
+                "medicine": medicine,
+                "type": "brand"
+            })
+
+        if medicine.composition:
+            search_entries.append({
+                "text": normalize(medicine.composition),
+                "medicine": medicine,
+                "type": "composition"
+            })
+
+    # ============================================================
+    # 7. DOSAGE / FREQUENCY
+    # ============================================================
+
+    dosage_pattern = re.compile(
+        r"\b\d+(?:\.\d+)?\s*(?:mg|ml|mcg|g|iu|mg/ml|mcg/ml|%)\b",
+        re.IGNORECASE
     )
 
-    db.add(prescription)
-    db.commit()
+    frequency_pattern = re.compile(
+        r"\b(?:"
+        r"1-0-0|"
+        r"0-1-0|"
+        r"0-0-1|"
+        r"1-1-0|"
+        r"0-1-1|"
+        r"1-0-1|"
+        r"1-1-1|"
+        r"OD|"
+        r"BD|"
+        r"TDS|"
+        r"QID|"
+        r"SOS|"
+        r"HS|"
+        r"AC|"
+        r"PC|"
+        r"once\s+daily|"
+        r"twice\s+daily|"
+        r"thrice\s+daily|"
+        r"once\s+a\s+day|"
+        r"twice\s+a\s+day"
+        r")\b",
+        re.IGNORECASE
+    )
+    # ============================================================
+    # 8. FIND MEDICINES
+    # ============================================================
 
-    return {
-        "medicines": medicines,
-        "summary": summary
+    detected = []
+    seen_ids = set()
+
+    # Words that clearly indicate the OCR line is NOT a medicine
+    ignore_words = {
+        "prescription",
+        "medical facility",
+        "date",
+        "patient",
+        "name",
+        "address",
+        "phone",
+        "signature",
+        "rank",
+        "degree",
+        "edition",
+        "lot no",
+        "serial",
+        "number",
+        "superscription",
+        "inscription",
+        "subscription",
+        "signa",
+        "mfr",
+        "mfg",
+        "manufacturer"
     }
 
+    for line in lines:
 
+        normalized_line = normalize(line)
+
+        if not normalized_line:
+            continue
+
+        # Ignore obvious non-medicine prescription text
+        if any(word in normalized_line for word in ignore_words):
+            continue
+
+        best_medicine = None
+        best_score = 0
+        best_type = None
+
+        for entry in search_entries:
+
+            medicine_text = entry["text"]
+
+            scores = [
+                fuzz.ratio(
+                    normalized_line,
+                    medicine_text
+                ),
+                fuzz.token_set_ratio(
+                    normalized_line,
+                    medicine_text
+                ),
+                fuzz.token_sort_ratio(
+                    normalized_line,
+                    medicine_text
+                )
+            ]
+
+            score = max(scores)
+
+            # Do not allow weak brand/composition matches
+            if entry["type"] == "composition":
+                score *= 0.95
+
+            if entry["type"] == "brand":
+                score *= 0.95
+
+            if score > best_score:
+                best_score = score
+                best_medicine = entry["medicine"]
+                best_type = entry["type"]
+
+        print(
+            f"OCR candidate: {line!r} "
+            f"=> {best_medicine.name if best_medicine else 'NONE'} "
+            f"| score={best_score:.1f} "
+            f"| type={best_type}"
+        )
+
+        # STRICT MATCHING
+        if not best_medicine:
+            continue
+
+        if best_score < 30:
+            continue
+
+        medicine_id = best_medicine.medicine_id
+
+        if medicine_id in seen_ids:
+            continue
+
+        seen_ids.add(medicine_id)
+
+        # ========================================================
+        # 9. DOSAGE
+        # ========================================================
+
+        dosage_match = dosage_pattern.search(line)
+
+        dosage = (
+            dosage_match.group(0)
+            if dosage_match
+            else ""
+        )
+
+        # ========================================================
+        # 10. FREQUENCY
+        # ========================================================
+
+        frequency_match = frequency_pattern.search(line)
+
+        frequency = (
+            frequency_match.group(0)
+            if frequency_match
+            else ""
+        )
+
+        # ========================================================
+        # 11. STOCK
+        # ========================================================
+
+        stock_quantity = best_medicine.stock_quantity or 0
+
+        if stock_quantity <= 0:
+            stock_status = "out-of-stock"
+
+        elif stock_quantity < 10:
+            stock_status = "low-stock"
+
+        else:
+            stock_status = "in-stock"
+
+        # ========================================================
+        # 12. EXPIRY
+        # ========================================================
+
+        expiry_status = "unknown"
+
+        if best_medicine.expiry_date:
+
+            today = date.today()
+
+            if best_medicine.expiry_date < today:
+                expiry_status = "expired"
+
+            elif (
+                best_medicine.expiry_date - today
+            ).days <= 30:
+                expiry_status = "expiring-soon"
+
+            else:
+                expiry_status = "valid"
+
+        # ========================================================
+        # 13. RESULT
+        # ========================================================
+
+        detected.append({
+
+            "name": best_medicine.name,
+
+            "composition": (
+                best_medicine.composition or ""
+            ),
+
+            "brand": (
+                best_medicine.brand or ""
+            ),
+
+            "dosage": dosage,
+
+            "frequency": frequency,
+
+            "stockStatus": stock_status,
+
+            "stockQuantity": stock_quantity,
+
+            "price": (
+                float(best_medicine.price)
+                if best_medicine.price is not None
+                else None
+            ),
+
+            "expiryDate": (
+                best_medicine.expiry_date.isoformat()
+                if best_medicine.expiry_date
+                else None
+            ),
+
+            "expiryStatus": expiry_status,
+
+            "medicineId": medicine_id,
+
+            "matchConfidence": round(
+                best_score,
+                2
+            )
+        })
+
+    # ============================================================
+    # 14. SUMMARY
+    # ============================================================
+
+    if detected:
+
+        summary = (
+            f"Detected {len(detected)} "
+            f"medicine(s) from the prescription."
+        )
+
+    else:
+
+        summary = (
+            "No known medicines could be confidently "
+            "identified from this prescription."
+        )
+
+    # ============================================================
+    # 15. SAVE HISTORY
+    # ============================================================
+
+    try:
+
+        image_base64 = base64.b64encode(
+            contents
+        ).decode("utf-8")
+
+        prescription = models.Prescription(
+
+            customer_id=user["user_id"],
+
+            image_base64=image_base64,
+
+            extracted_medicines=[
+                medicine["name"]
+                for medicine in detected
+            ],
+
+            ai_summary=summary,
+
+            status="done"
+        )
+
+        db.add(prescription)
+
+        db.commit()
+
+        db.refresh(prescription)
+
+    except Exception as e:
+
+        db.rollback()
+
+        print(
+            f"Prescription history error: {str(e)}"
+        )
+
+    # ============================================================
+    # 16. RETURN
+    # ============================================================
+
+    return {
+
+        "medicines": detected,
+
+        "summary": summary,
+
+        "rawText": raw_text
+    }
 # 📌 GET PRESCRIPTIONS
 @router.get("/prescriptions")
 def get_prescriptions(user=Depends(get_current_user), db: Session = Depends(get_db)):
@@ -522,23 +977,6 @@ def get_prescriptions(user=Depends(get_current_user), db: Session = Depends(get_
     ]
 
 
-# 📌 CREATE MEDICINE REQUEST
-@router.post("/medicine-request")
-def create_medicine_request(data: dict, user=Depends(get_current_user), db: Session = Depends(get_db)):
-    req = models.MedicineRequest(
-        medicine_name=data.get("name"),
-        composition=data.get("composition"),
-        customer_name=user["name"],
-        customer_phone=user["phone"],
-        requested_by=user["user_id"],
-        status="pending"
-    )
-
-    db.add(req)
-    db.commit()
-
-    return {"message": "Request created"}
-
 
 # 📌 GET MEDICINE REQUESTS
 @router.get("/medicine-requests")
@@ -559,24 +997,51 @@ def get_medicine_requests(user=Depends(get_current_user), db: Session = Depends(
     ]
 
 
-# 📌 GET ORDERS
-from sqlalchemy.orm import joinedload
 
 @router.get("/orders")
-def get_orders(user=Depends(get_current_user), db: Session = Depends(get_db)):
-    orders = db.query(models.Order).filter(
-        (models.Order.customer_id == user["user_id"]) |
-        (models.Order.customer_phone == user["phone"])
-    ).order_by(models.Order.order_date.desc()).all()
+def get_orders(
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+    from_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    to_date: Optional[str] = Query(None, description="YYYY-MM-DD")
+):
+    # Base query: orders by customer ID or phone
+    customer = db.query(models.User).filter(
+        models.User.user_id == user["user_id"]
+    ).first()
 
+    if not customer or not customer.phone:
+        return []
+
+    query = db.query(models.Order).filter(
+        models.Order.customer_phone == customer.phone
+    )
+
+    # Apply date filters if provided
+    if from_date:
+        try:
+            from_dt = datetime.strptime(from_date, "%Y-%m-%d")
+            query = query.filter(models.Order.order_date >= from_dt)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid from_date format. Use YYYY-MM-DD")
+
+    if to_date:
+        try:
+            # Add one day to make it exclusive of the end date
+            to_dt = datetime.strptime(to_date, "%Y-%m-%d") + timedelta(days=1)
+            query = query.filter(models.Order.order_date < to_dt)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid to_date format. Use YYYY-MM-DD")
+
+    orders = query.order_by(models.Order.order_date.desc()).all()
+
+    # Build response with items
     result = []
     for o in orders:
-        # ✅ Eager load medicine to avoid None
         items = db.query(models.OrderItem)\
             .options(joinedload(models.OrderItem.medicine))\
             .filter(models.OrderItem.order_id == o.order_id)\
             .all()
-
         result.append({
             "id": o.order_id,
             "date": o.order_date.isoformat() if o.order_date else None,
@@ -618,15 +1083,35 @@ def vision(data: dict, user=Depends(get_current_user)):
     }
 
 @router.post("/medicine-request")
-def create_medicine_request(data: dict, user=Depends(get_current_user), db: Session = Depends(get_db)):
+def create_medicine_request(
+    data: dict,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    customer = db.query(models.User).filter(
+        models.User.user_id == user["user_id"]
+    ).first()
+
+    if not customer:
+        raise HTTPException(
+            status_code=404,
+            detail="Customer not found"
+        )
+
     req = models.MedicineRequest(
         medicine_name=data.get("name"),
         composition=data.get("composition"),
-        customer_name=user["name"],
-        customer_phone=user["phone"],
-        requested_by=user["user_id"],
+        customer_name=customer.name,
+        customer_phone=customer.phone,
+        requested_by=customer.user_id,
         status="pending"
     )
+
     db.add(req)
     db.commit()
-    return {"message": "Request created"}
+    db.refresh(req)
+
+    return {
+        "message": "Request created",
+        "request_id": req.request_id
+    }

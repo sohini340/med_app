@@ -79,7 +79,7 @@ const App = () => {
           <Route path="/customer/feedback" element={<Dash roles={["customer"]}><CustomerFeedback /></Dash>} />
 
           {/* 👑 OWNER */}
-          <Route path="/owner" element={<Dash roles={["owner"]}><AdminDashboard /></Dash>} />
+          <Route path="/owner" element={<Dash roles={["owner"]}><Overview /></Dash>} />
           <Route path="/owner/overview" element={<Dash roles={["owner"]}><Overview /></Dash>} />
           <Route path="/owner/sales" element={<Dash roles={["owner"]}><Sales /></Dash>} />
           <Route path="/owner/inventory" element={<Dash roles={["owner"]}><Inventory /></Dash>} />
@@ -93,7 +93,7 @@ const App = () => {
           <Route path="/owner/ask-mochi" element={<Dash roles={["owner"]}><OwnerAskMochi /></Dash>} />
 
           {/* 👨‍⚕️ EMPLOYEE */}
-          <Route path="/employee" element={<Dash roles={["employee"]}><EmployeeDashboard /></Dash>} /> {/* 🔥 NEW */}
+          <Route path="/employee" element={<Dash roles={["employee"]}><MedicineSearch /></Dash>} /> {/* 🔥 NEW */}
           <Route path="/employee/medicines" element={<Dash roles={["employee"]}><MedicineSearch /></Dash>} />
           <Route path="/employee/add-medicine" element={<Dash roles={["employee"]}><AddMedicine /></Dash>} />
           <Route path="/employee/book-appointment" element={<Dash roles={["employee"]}><EmployeeBookAppointment /></Dash>} />

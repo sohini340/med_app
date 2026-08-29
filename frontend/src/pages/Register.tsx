@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { useAuthStore } from '@/stores/authStore';
 import { ThemeToggle } from '@/components/ThemeToggle';
@@ -257,6 +257,12 @@ const PasswordRequirements = () => (
 );
 
 // ============================================================================
+// API Configuration
+// ============================================================================
+
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
+// ============================================================================
 // Main Component
 // ============================================================================
 
@@ -265,6 +271,7 @@ const Register = () => {
   const { login } = useAuthStore();
   const urlRole = useRoleFromUrl();
   
+  // State declarations
   const [role, setRole] = useState<Role>(urlRole || 'customer');
   const [form, setForm] = useState<RegisterForm>({
     name: '',
@@ -272,10 +279,18 @@ const Register = () => {
     phone: '',
     password: '',
   });
-  const [showPassword, setShowPassword] = useState(false);
+  const [emailOtp, setEmailOtp] = useState('');
+  const [phoneOtp, setPhoneOtp] = useState('');
+  const [emailOtpSent, setEmailOtpSent] = useState(false);
+  const [phoneOtpSent, setPhoneOtpSent] = useState(false);
+  const [emailVerified, setEmailVerified] = useState(false);
+  const [phoneVerified, setPhoneVerified] = useState(false);
+  const [otpLoading, setOtpLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
-  
+  const [showPassword, setShowPassword] = useState(false);
+  const [debugInfo, setDebugInfo] = useState<string>('');
+
   const { errors, validateField, validateAll, markTouched, isFieldInvalid } = useFormValidation(form);
 
   // Role validation effect
@@ -296,6 +311,7 @@ const Register = () => {
     setForm(prev => ({ ...prev, [field]: processedValue }));
     validateField(field, processedValue);
     setApiError(null);
+    setDebugInfo('');
   }, [validateField]);
 
   const handleBlur = useCallback((field: keyof RegisterForm) => {
@@ -303,22 +319,188 @@ const Register = () => {
     validateField(field, form[field]);
   }, [markTouched, validateField, form]);
 
+  const sendOtp = async (type: 'email' | 'phone') => {
+    setApiError(null);
+    setDebugInfo('');
+    setOtpLoading(true);
+
+    try {
+      // Validation before sending OTP
+      if (type === 'email' && !form.email) {
+        throw new Error('Please enter your email address');
+      }
+      if (type === 'phone' && !form.phone) {
+        throw new Error('Please enter your phone number');
+      }
+
+      // Validate the field before sending OTP
+      const fieldToValidate = type === 'email' ? 'email' : 'phone';
+      const isValid = validateField(fieldToValidate, form[fieldToValidate]);
+      if (!isValid) {
+        throw new Error(`Please enter a valid ${fieldToValidate}`);
+      }
+
+      const payload = type === 'email'
+        ? {
+            email: form.email,
+            verification_type: 'email',
+          }
+        : {
+            phone: `+91${form.phone}`,
+            verification_type: 'phone',
+          };
+
+      console.log(`Sending OTP to ${type}:`, payload);
+      setDebugInfo(`Sending OTP to ${type}...`);
+
+      const response = await fetch(`${API_BASE_URL}/auth/send-otp`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+
+      console.log('Response status:', response.status);
+      
+      // Try to get response as text first for better error handling
+      const responseText = await response.text();
+      let data;
+      try {
+        data = JSON.parse(responseText);
+      } catch (e) {
+        // If response is not JSON, use text
+        data = { detail: responseText || 'Server returned non-JSON response' };
+      }
+
+      console.log('Response data:', data);
+
+      if (!response.ok) {
+        throw new Error(data.detail || data.message || `Failed to send OTP (Status: ${response.status})`);
+      }
+
+      if (type === 'email') {
+        setEmailOtpSent(true);
+        setDebugInfo('OTP sent to your email successfully!');
+      } else {
+        setPhoneOtpSent(true);
+        setDebugInfo('OTP sent to your phone successfully!');
+      }
+
+    } catch (error) {
+      console.error('OTP send error:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Failed to send OTP';
+      setApiError(errorMessage);
+      setDebugInfo(`Error: ${errorMessage}`);
+    } finally {
+      setOtpLoading(false);
+    }
+  };
+
+  const verifyOtp = async (type: 'email' | 'phone') => {
+    setApiError(null);
+    setDebugInfo('');
+    setOtpLoading(true);
+
+    try {
+      const otp = type === 'email' ? emailOtp : phoneOtp;
+      if (!otp || otp.length !== 6) {
+        throw new Error('Please enter a valid 6-digit OTP');
+      }
+
+      const payload = type === 'email'
+        ? {
+            email: form.email,
+            otp: otp,
+            verification_type: 'email',
+          }
+        : {
+            phone: `+91${form.phone}`,
+            otp: otp,
+            verification_type: 'phone',
+          };
+
+      console.log(`Verifying OTP for ${type}:`, payload);
+      setDebugInfo(`Verifying OTP for ${type}...`);
+
+      const response = await fetch(`${API_BASE_URL}/auth/verify-otp`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const responseText = await response.text();
+      let data;
+      try {
+        data = JSON.parse(responseText);
+      } catch (e) {
+        data = { detail: responseText || 'Server returned non-JSON response' };
+      }
+
+      console.log('Verify response:', data);
+
+      if (!response.ok) {
+        throw new Error(data.detail || data.message || 'Invalid OTP');
+      }
+
+      if (type === 'email') {
+        setEmailVerified(true);
+        setDebugInfo('Email verified successfully!');
+      } else {
+        setPhoneVerified(true);
+        setDebugInfo('Phone verified successfully!');
+      }
+
+    } catch (error) {
+      console.error('OTP verification error:', error);
+      const errorMessage = error instanceof Error ? error.message : 'OTP verification failed';
+      setApiError(errorMessage);
+      setDebugInfo(`Error: ${errorMessage}`);
+    } finally {
+      setOtpLoading(false);
+    }
+  };
+
+  // Development helper to use test OTP
+  const useTestOtp = (type: 'email' | 'phone') => {
+    if (type === 'email') {
+      setEmailOtp('123456');
+    } else {
+      setPhoneOtp('123456');
+    }
+    setDebugInfo(`Test OTP (123456) filled for ${type}`);
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setApiError(null);
+    setDebugInfo('');
     
     // Mark all fields as touched
     (Object.keys(form) as Array<keyof RegisterForm>).forEach(markTouched);
     
     if (!validateAll()) return;
-    
+
+    // Both email and phone must be verified
+    if (!emailVerified) {
+      setApiError('Please verify your email address first.');
+      return;
+    }
+
+    if (!phoneVerified) {
+      setApiError('Please verify your phone number first.');
+      return;
+    }
+
     setLoading(true);
     
     try {
       const formattedPhone = `+91${form.phone}`;
       const config = ROLE_CONFIG[role];
       
-      const response = await fetch(`http://localhost:8000/auth/register`, {
+      const response = await fetch(`${API_BASE_URL}/auth/register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...form, phone: formattedPhone, role }),
@@ -409,6 +591,15 @@ const Register = () => {
             </Alert>
           )}
 
+          {/* Debug Info */}
+          {debugInfo && (
+            <Alert className="mb-6 border-blue-500 bg-blue-50 dark:bg-blue-950/20">
+              <AlertDescription className="text-sm text-blue-700 dark:text-blue-300">
+                {debugInfo}
+              </AlertDescription>
+            </Alert>
+          )}
+
           {/* Registration Form */}
           <form onSubmit={handleSubmit} className="bg-white dark:bg-slate-900 rounded-xl shadow-lg border border-slate-200 dark:border-slate-800 p-6 space-y-5">
             
@@ -426,40 +617,206 @@ const Register = () => {
               onBlur={() => handleBlur('name')}
             />
 
-            <FormField
-              id="email"
-              label="Email Address"
-              type="email"
-              placeholder="you@example.com"
-              value={form.email}
-              error={errors.email}
-              isInvalid={isFieldInvalid('email')}
-              disabled={loading}
-              autoComplete="email"
-              onChange={(value) => handleInputChange('email', value)}
-              onBlur={() => handleBlur('email')}
-            />
+            <div className="space-y-2">
+              <FormField
+                id="email"
+                label="Email Address"
+                type="email"
+                placeholder="you@example.com"
+                value={form.email}
+                error={errors.email}
+                isInvalid={isFieldInvalid('email')}
+                disabled={loading || emailVerified}
+                autoComplete="email"
+                onChange={(value) => {
+                  handleInputChange('email', value);
+                  setEmailVerified(false);
+                  setEmailOtpSent(false);
+                  setEmailOtp('');
+                }}
+                onBlur={() => handleBlur('email')}
+              />
 
-            <FormField
-              id="phone"
-              label="Phone Number"
-              type="tel"
-              placeholder="9876543210"
-              value={form.phone}
-              error={errors.phone}
-              isInvalid={isFieldInvalid('phone')}
-              disabled={loading}
-              autoComplete="tel"
-              onChange={(value) => handleInputChange('phone', value)}
-              onBlur={() => handleBlur('phone')}
-              leftElement={
-                <div className="flex items-center gap-1 text-slate-500 dark:text-slate-400">
-                  <span className="text-sm font-medium">+91</span>
-                  <span className="text-slate-300 dark:text-slate-600">|</span>
+              {!emailVerified && !emailOtpSent && (
+                <div className="flex gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="flex-1"
+                    disabled={!form.email || !!errors.email || otpLoading}
+                    onClick={() => sendOtp('email')}
+                  >
+                    {otpLoading ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      'Send Email OTP'
+                    )}
+                  </Button>
+                  {import.meta.env.DEV && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="text-xs"
+                      onClick={() => useTestOtp('email')}
+                    >
+                      Test OTP
+                    </Button>
+                  )}
                 </div>
-              }
-              helperText="Enter 10-digit mobile number (starts with 6, 7, 8, or 9)"
-            />
+              )}
+
+              {emailOtpSent && !emailVerified && (
+                <div className="space-y-2">
+                  <div className="flex gap-2">
+                    <Input
+                      type="text"
+                      placeholder="Enter 6-digit OTP"
+                      value={emailOtp}
+                      onChange={(e) =>
+                        setEmailOtp(e.target.value.replace(/\D/g, '').slice(0, 6))
+                      }
+                      maxLength={6}
+                      className="flex-1"
+                    />
+                    <Button
+                      type="button"
+                      disabled={emailOtp.length !== 6 || otpLoading}
+                      onClick={() => verifyOtp('email')}
+                    >
+                      {otpLoading ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        'Verify'
+                      )}
+                    </Button>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="text-xs text-slate-500"
+                    onClick={() => {
+                      setEmailOtpSent(false);
+                      setEmailOtp('');
+                    }}
+                  >
+                    Resend OTP
+                  </Button>
+                </div>
+              )}
+
+              {emailVerified && (
+                <p className="text-sm text-green-600 flex items-center gap-1">
+                  <CheckCircle2 className="w-4 h-4" />
+                  Email verified
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <FormField
+                id="phone"
+                label="Phone Number"
+                type="tel"
+                placeholder="9876543210"
+                value={form.phone}
+                error={errors.phone}
+                isInvalid={isFieldInvalid('phone')}
+                disabled={loading || phoneVerified}
+                autoComplete="tel"
+                onChange={(value) => {
+                  handleInputChange('phone', value);
+                  setPhoneVerified(false);
+                  setPhoneOtpSent(false);
+                  setPhoneOtp('');
+                }}
+                onBlur={() => handleBlur('phone')}
+                leftElement={
+                  <div className="flex items-center gap-1 text-slate-500 dark:text-slate-400">
+                    <span className="text-sm font-medium">+91</span>
+                    <span className="text-slate-300 dark:text-slate-600">|</span>
+                  </div>
+                }
+                helperText="Enter 10-digit mobile number (starts with 6, 7, 8, or 9)"
+              />
+
+              {!phoneVerified && !phoneOtpSent && (
+                <div className="flex gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="flex-1"
+                    disabled={!form.phone || !!errors.phone || otpLoading}
+                    onClick={() => sendOtp('phone')}
+                  >
+                    {otpLoading ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      'Send Phone OTP'
+                    )}
+                  </Button>
+                  {import.meta.env.DEV && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="text-xs"
+                      onClick={() => useTestOtp('phone')}
+                    >
+                      Test OTP
+                    </Button>
+                  )}
+                </div>
+              )}
+
+              {phoneOtpSent && !phoneVerified && (
+                <div className="space-y-2">
+                  <div className="flex gap-2">
+                    <Input
+                      type="text"
+                      placeholder="Enter 6-digit OTP"
+                      value={phoneOtp}
+                      onChange={(e) =>
+                        setPhoneOtp(e.target.value.replace(/\D/g, '').slice(0, 6))
+                      }
+                      maxLength={6}
+                      className="flex-1"
+                    />
+                    <Button
+                      type="button"
+                      disabled={phoneOtp.length !== 6 || otpLoading}
+                      onClick={() => verifyOtp('phone')}
+                    >
+                      {otpLoading ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        'Verify'
+                      )}
+                    </Button>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="text-xs text-slate-500"
+                    onClick={() => {
+                      setPhoneOtpSent(false);
+                      setPhoneOtp('');
+                    }}
+                  >
+                    Resend OTP
+                  </Button>
+                </div>
+              )}
+
+              {phoneVerified && (
+                <p className="text-sm text-green-600 flex items-center gap-1">
+                  <CheckCircle2 className="w-4 h-4" />
+                  Phone verified
+                </p>
+              )}
+            </div>
 
             <FormField
               id="password"
@@ -490,7 +847,12 @@ const Register = () => {
             <Button 
               type="submit" 
               className="w-full h-11 mt-2"
-              disabled={loading || !isFormValid}
+              disabled={
+                loading ||
+                !isFormValid ||
+                !emailVerified ||
+                !phoneVerified
+              }
             >
               {loading ? (
                 <>

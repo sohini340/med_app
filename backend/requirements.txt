@@ -2,3 +2,6 @@ fastapi
 uvicorn
 sqlalchemy
 pydantic
+pytesseract
+pillow
+rapidfuzz

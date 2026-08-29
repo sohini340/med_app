@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
-import { ShoppingCart, Package, Search, X, Send, ChevronRight, Loader2 } from "lucide-react";
+import { ShoppingCart, Package, Search, X, Send, ChevronRight, Loader2, Filter } from "lucide-react";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
@@ -37,8 +37,10 @@ type Preorder = {
   status: string;
 };
 
+type DateRange = "all" | "today" | "tomorrow" | "7days" | "15days" | "30days";
+
 const TrackOrders = () => {
-  const { user, token } = useAuthStore();
+  const { token } = useAuthStore();
   const [orders, setOrders] = useState<Order[]>([]);
   const [preorders, setPreorders] = useState<Preorder[]>([]);
   const [loading, setLoading] = useState(true);
@@ -48,42 +50,97 @@ const TrackOrders = () => {
   const [medicineName, setMedicineName] = useState("");
   const [composition, setComposition] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [dateRange, setDateRange] = useState<DateRange>("all");
 
   useEffect(() => {
     if (!token) return;
-
-    const fetchData = async () => {
-      try {
-        const [ordersRes, requestsRes] = await Promise.all([
-          fetch(`${API_BASE_URL}/customer/orders`, {
-            headers: { Authorization: `Bearer ${token}` },
-          }),
-          fetch(`${API_BASE_URL}/customer/medicine-requests`, {
-            headers: { Authorization: `Bearer ${token}` },
-          }),
-        ]);
-
-        if (!ordersRes.ok) throw new Error("Orders fetch failed");
-        if (!requestsRes.ok) throw new Error("Requests fetch failed");
-
-        const ordersData = await ordersRes.json();
-        const requestsData = await requestsRes.json();
-
-        if (!Array.isArray(ordersData)) throw new Error("Invalid orders format");
-        if (!Array.isArray(requestsData)) throw new Error("Invalid requests format");
-
-        setOrders(ordersData);
-        setPreorders(requestsData);
-      } catch (err: any) {
-        console.error(err);
-        toast.error(err.message || "Failed to load your data");
-      } finally {
-        setLoading(false);
-      }
-    };
-
     fetchData();
-  }, [token]);
+  }, [token, dateRange]);
+
+  const fetchData = async () => {
+    setLoading(true);
+    try {
+      // Build URL with date params
+      let ordersUrl = `${API_BASE_URL}/customer/orders`;
+      const params = new URLSearchParams();
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const tomorrow = new Date(today);
+      tomorrow.setDate(tomorrow.getDate() + 1);
+
+      let fromDate: string | null = null;
+      let toDate: string | null = null;
+
+      switch (dateRange) {
+        case "today":
+          fromDate = today.toISOString().split("T")[0];
+          toDate = tomorrow.toISOString().split("T")[0];
+          break;
+        case "tomorrow":
+          const dayAfter = new Date(tomorrow);
+          dayAfter.setDate(dayAfter.getDate() + 1);
+          fromDate = tomorrow.toISOString().split("T")[0];
+          toDate = dayAfter.toISOString().split("T")[0];
+          break;
+        case "7days":
+          fromDate = today.toISOString().split("T")[0];
+          const plus7 = new Date(today);
+          plus7.setDate(plus7.getDate() + 7);
+          toDate = plus7.toISOString().split("T")[0];
+          break;
+        case "15days":
+          fromDate = today.toISOString().split("T")[0];
+          const plus15 = new Date(today);
+          plus15.setDate(plus15.getDate() + 15);
+          toDate = plus15.toISOString().split("T")[0];
+          break;
+        case "30days":
+          fromDate = today.toISOString().split("T")[0];
+          const plus30 = new Date(today);
+          plus30.setDate(plus30.getDate() + 30);
+          toDate = plus30.toISOString().split("T")[0];
+          break;
+        default:
+          break;
+      }
+
+      if (fromDate) params.append("from_date", fromDate);
+      if (toDate) params.append("to_date", toDate);
+      if (params.toString()) ordersUrl += `?${params.toString()}`;
+
+      const [ordersRes, requestsRes] = await Promise.all([
+        fetch(ordersUrl, { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(`${API_BASE_URL}/customer/medicine-requests`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+      ]);
+
+      if (!ordersRes.ok) {
+        const errorText = await ordersRes.text();
+        console.error("Orders error:", ordersRes.status, errorText);
+        throw new Error(`Orders fetch failed (${ordersRes.status})`);
+      }
+      if (!requestsRes.ok) {
+        const errorText = await requestsRes.text();
+        console.error("Requests error:", requestsRes.status, errorText);
+        throw new Error(`Requests fetch failed (${requestsRes.status})`);
+      }
+
+      const ordersData = await ordersRes.json();
+      const requestsData = await requestsRes.json();
+
+      if (!Array.isArray(ordersData)) throw new Error("Invalid orders format");
+      if (!Array.isArray(requestsData)) throw new Error("Invalid requests format");
+
+      setOrders(ordersData);
+      setPreorders(requestsData);
+    } catch (err: any) {
+      console.error(err);
+      toast.error(err.message || "Failed to load your data");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handlePreorder = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -109,7 +166,7 @@ const TrackOrders = () => {
       setMedicineName("");
       setComposition("");
 
-      // Refresh preorders list
+      // Refresh preorders
       const refreshRes = await fetch(`${API_BASE_URL}/customer/medicine-requests`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -124,11 +181,15 @@ const TrackOrders = () => {
     }
   };
 
-  // Safe search (prevents null crashes)
-  const filteredOrders = orders.filter((o) =>
-    o.id.toString().includes(searchOrder) ||
-    o.items.some((i) => (i.name || "").toLowerCase().includes(searchOrder.toLowerCase()))
-  );
+  // Client-side search by medicine name or order ID
+  const filteredOrders = orders.filter((o) => {
+    if (!searchOrder.trim()) return true;
+    const searchLower = searchOrder.toLowerCase();
+    return (
+      o.id.toString().includes(searchLower) ||
+      o.items.some((item) => item.name.toLowerCase().includes(searchLower))
+    );
+  });
 
   const filteredPreorders = preorders.filter((p) =>
     p.medicine_name.toLowerCase().includes(searchRequest.toLowerCase()) ||
@@ -152,12 +213,9 @@ const TrackOrders = () => {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-foreground">Track Orders</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">View your purchase history and manage medicine requests</p>
-        </div>
+      <div>
+        <h1 className="text-2xl font-semibold tracking-tight text-foreground">Track Orders</h1>
+        <p className="text-sm text-muted-foreground mt-0.5">View your purchase history and manage medicine requests</p>
       </div>
 
       <Tabs defaultValue="orders" className="space-y-4">
@@ -172,6 +230,31 @@ const TrackOrders = () => {
 
         {/* ORDERS TAB */}
         <TabsContent value="orders" className="space-y-4">
+          {/* Date filter buttons */}
+          <div className="flex flex-wrap gap-2 items-center">
+            <Filter className="h-4 w-4 text-muted-foreground" />
+            <span className="text-sm text-muted-foreground mr-1">Filter by:</span>
+            {[
+              { value: "all", label: "All" },
+              { value: "today", label: "Today" },
+              { value: "tomorrow", label: "Tomorrow" },
+              { value: "7days", label: "7 days" },
+              { value: "15days", label: "15 days" },
+              { value: "30days", label: "30 days" },
+            ].map(({ value, label }) => (
+              <Button
+                key={value}
+                variant={dateRange === value ? "default" : "outline"}
+                size="sm"
+                onClick={() => setDateRange(value as DateRange)}
+                className="h-8 px-3 text-xs"
+              >
+                {label}
+              </Button>
+            ))}
+          </div>
+
+          {/* Search input */}
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input
@@ -189,8 +272,8 @@ const TrackOrders = () => {
 
           {filteredOrders.length === 0 ? (
             <EmptyState
-              title={searchOrder ? "No matching orders" : "No orders yet"}
-              description={searchOrder ? "Try a different search term" : "Your purchases will appear here"}
+              title={searchOrder ? "No matching orders" : "No orders in this period"}
+              description={searchOrder ? "Try a different search term" : "Change the date filter or place an order"}
               icon={<ShoppingCart className="h-10 w-10 text-muted-foreground/30" />}
             />
           ) : (
@@ -242,7 +325,7 @@ const TrackOrders = () => {
           )}
         </TabsContent>
 
-        {/* REQUESTS TAB */}
+        {/* REQUESTS TAB (unchanged, already working) */}
         <TabsContent value="requests" className="space-y-4">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
@@ -282,7 +365,6 @@ const TrackOrders = () => {
             </div>
           )}
 
-          {/* New Request Form */}
           <div className="bg-card rounded-xl border border-border p-5 mt-4">
             <h3 className="font-semibold text-sm text-foreground mb-3">Request a Medicine</h3>
             <form onSubmit={handlePreorder} className="space-y-3">

@@ -16,6 +16,7 @@ interface AuthState {
   isAuthenticated: boolean;
 
   login: (email: string, password: string) => Promise<boolean>;
+  googleLogin: (credential: string) => Promise<boolean>;
   logout: () => void;
 }
 
@@ -74,7 +75,52 @@ export const useAuthStore = create<AuthState>()(
           return false;
         }
       },
+	
+      googleLogin: async (credential) => {
+        try {
+          const res = await fetch("http://localhost:8000/auth/google", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ credential }),
+          });
 
+          const data = await res.json();
+
+          if (!res.ok) {
+            console.error("Google login failed:", data);
+            return false;
+          }
+
+          if (
+            !data.access_token ||
+            !data.user ||
+            typeof data.user.user_id !== "number" ||
+            !data.user.role
+          ) {
+            console.error("Invalid Google login response:", data);
+            return false;
+          }
+
+          const normalizedUser = {
+            ...data.user,
+            role: data.user.role.toLowerCase(),
+          };
+
+          set({
+            user: normalizedUser,
+            token: data.access_token,
+            isAuthenticated: true,
+          });
+
+          return true;
+
+        } catch (err) {
+          console.error("Google login error:", err);
+          return false;
+        }
+      },
       // ✅ LOGOUT
       logout: () => {
         set({

@@ -237,9 +237,7 @@ def reject_request(
     return {"message": "Rejected"}
 
 
-# ------------------ FEEDBACK (FIXED FIELD NAME) ------------------
-# ------------------ FEEDBACK (FULLY FIXED) ------------------
-# ------------------ FEEDBACK (FIXED, NO RELIANCE ON BROKEN RELATIONSHIP) ------------------
+# ------------------ FEEDBACK ------------------
 @router.get("/feedback")
 def get_feedback(
     user=Depends(require_role(["owner"])),
